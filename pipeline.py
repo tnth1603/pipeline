@@ -15,51 +15,58 @@ app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── CUSTOMISE THESE ───────────────────────────────────────────────────────────
-COMPANY_NAME = "Your Company"
+COMPANY_NAME = "Global Monkeypox Tracker"
 
 # ── STEP 2: AGENT CLEANING ────────────────────────────────────────────────────
-CLEANING_AGENT_PROMPT = """
-You are an expert data cleaning agent. You will receive:
-1. A summary of the current dataset (shape, column stats, sample rows)
-2. A list of issues already fixed in previous iterations
+ANALYSIS_SYSTEM_PROMPT = """
+You are a senior epidemiological data analyst. The dataset is global Monkeypox tracking data from Our World in Data.
 
-Your job: identify ONE data quality issue that has not yet been fixed.
-Return ONLY a JSON object with this exact structure:
+Columns:
+- location: country or region name
+- date: date of record (YYYY-MM-DD)
+- iso_code: country ISO code
+- total_cases: cumulative total cases
+- total_deaths: cumulative total deaths
+- new_cases: new cases on that date
+- new_deaths: new deaths on that date
+- new_cases_smoothed: 7-day smoothed new cases
+- new_deaths_smoothed: 7-day smoothed new deaths
+- new_cases_per_million: new cases per million population
+- total_cases_per_million: total cases per million population
+- new_cases_smoothed_per_million: smoothed new cases per million
+- new_deaths_per_million: new deaths per million
+- total_deaths_per_million: total deaths per million
+- new_deaths_smoothed_per_million: smoothed new deaths per million
 
+Analyse the data and return ONLY a valid JSON object with this exact structure:
 {
-  "issue_found": true,
-  "issue_type": "one of: null_values | duplicates | outlier | encoding | format_inconsistency | logical_error | placeholder | semantic_encoding | cross_column | business_logic",
-  "column": "column name affected, or 'multiple'",
-  "description": "Plain English description of the issue",
-  "reasoning": "Why you believe this is an error, not valid data",
-  "confidence": "high | medium | low",
-  "fix_code": "Single Python expression using df variable. Must return df.",
-  "needs_human_review": false,
-  "human_review_reason": "Only fill if needs_human_review is true"
+  "period": "date range covered e.g. May 2022 - Dec 2023",
+  "row_count": 0,
+  "kpis": {
+    "total_global_cases": 0,
+    "total_global_deaths": 0,
+    "case_fatality_rate_pct": 0.0,
+    "peak_daily_new_cases": 0,
+    "countries_affected": 0
+  },
+  "trends": [
+    "trend observation 1",
+    "trend observation 2",
+    "trend observation 3"
+  ],
+  "anomalies": [
+    "anomaly or unusual pattern description"
+  ],
+  "top_items": [
+    {"name": "location name", "value": 0, "label": "total_cases"}
+  ],
+  "recommendations": [
+    "public health recommendation 1",
+    "public health recommendation 2",
+    "public health recommendation 3"
+  ]
 }
-
-If no issues remain, return:
-{ "issue_found": false }
-
-Rules:
-- Only identify ONE issue per response
-- Set needs_human_review=true if confidence is low OR if fix could lose real data
-- fix_code must be a single line assigning back to df
-- Never drop more than 5% of rows without flagging for human review
-- Consider business context: not all outliers are errors
-"""
-
-VERIFY_PROMPT = """
-You are verifying a data fix was applied correctly.
-Given the before/after column stats, confirm:
-1. Was the fix applied as expected?
-2. Did it create any new problems?
-
-Return ONLY JSON:
-{
-  "verified": true,
-  "note": "Brief confirmation or warning"
-}
+Return ONLY the JSON object, no markdown, no explanation.
 """
 
 def summarise_df(df, fixed_so_far):
