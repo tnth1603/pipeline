@@ -16,201 +16,148 @@ client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── CUSTOMISE ─────────────────────────────────────────────────────────────────
 COMPANY_NAME = "Global Monkeypox Tracker"
+MAX_ROWS = 1000        # keep small for free tier 512MB RAM
+MAX_ITERATIONS = 1     # 1 cleaning iteration to save credits + memory
 
 # ── STEP 2: AGENT CLEANING ────────────────────────────────────────────────────
 CLEANING_AGENT_PROMPT = """
-You are an expert data cleaning agent. You will receive:
-1. A summary of the current dataset (shape, column stats, sample rows)
-2. A list of issues already fixed in previous iterations
-
-Your job: identify ONE data quality issue that has not yet been fixed.
-Return ONLY a JSON object with this exact structure:
+You are an expert data cleaning agent. You will receive a summary of a dataset.
+Identify ONE data quality issue that has not yet been fixed.
+Return ONLY a JSON object:
 
 {
   "issue_found": true,
-  "issue_type": "one of: null_values | duplicates | outlier | encoding | format_inconsistency | logical_error | placeholder | semantic_encoding | cross_column | business_logic",
+  "issue_type": "null_values | duplicates | outlier | format_inconsistency | placeholder",
   "column": "column name affected, or 'multiple'",
   "description": "Plain English description of the issue",
-  "reasoning": "Why you believe this is an error, not valid data",
+  "reasoning": "Why you believe this is an error",
   "confidence": "high | medium | low",
-  "fix_code": "Single Python expression using df variable. Must return df.",
+  "fix_code": "Single Python line using df variable. Must assign back to df.",
   "needs_human_review": false,
-  "human_review_reason": "Only fill if needs_human_review is true"
+  "human_review_reason": ""
 }
 
-If no issues remain, return:
-{ "issue_found": false }
+If no issues remain, return: { "issue_found": false }
 
 Rules:
-- Only identify ONE issue per response
-- Set needs_human_review=true if confidence is low OR if fix could lose real data
-- fix_code must be a single line assigning back to df
-- Never drop more than 5% of rows without flagging for human review
-- Consider business context: not all outliers are errors
+- Only ONE issue per response
+- fix_code must be a single line
+- Never drop more than 5% of rows
 """
 
 VERIFY_PROMPT = """
-You are verifying a data fix was applied correctly.
-Given the before/after column stats, confirm:
-1. Was the fix applied as expected?
-2. Did it create any new problems?
-
-Return ONLY JSON:
-{
-  "verified": true,
-  "note": "Brief confirmation or warning"
-}
+Verify this data fix was applied correctly.
+Return ONLY JSON: { "verified": true, "note": "brief note" }
 """
 
 def summarise_df(df, fixed_so_far):
     summary = {
         "shape": {"rows": int(df.shape[0]), "cols": int(df.shape[1])},
         "columns": {},
-        "sample_rows": df.head(5).to_dict(orient='records'),
-        "issues_already_fixed": [x['issue_type'] + ": " + x['description'] for x in fixed_so_far]
+        "sample_rows": df.head(3).to_dict(orient='records'),
+        "issues_already_fixed": [x.get('description','') for x in fixed_so_far]
     }
     for col in df.columns:
         col_info = {
             "dtype": str(df[col].dtype),
             "nulls": int(df[col].isnull().sum()),
             "unique": int(df[col].nunique()),
-            "sample": [str(x) for x in df[col].dropna().unique()[:8]]
+            "sample": [str(x) for x in df[col].dropna().unique()[:5]]
         }
-        if pd.api.types.is_numeric_dtype(df[col]):
-            col_info["min"] = float(df[col].min()) if not df[col].isnull().all() else None
-            col_info["max"] = float(df[col].max()) if not df[col].isnull().all() else None
-            col_info["mean"] = float(df[col].mean()) if not df[col].isnull().all() else None
+        if pd.api.types.is_numeric_dtype(df[col]) and not df[col].isnull().all():
+            col_info["min"] = float(df[col].min())
+            col_info["max"] = float(df[col].max())
+            col_info["mean"] = round(float(df[col].mean()), 2)
         summary["columns"][col] = col_info
-    return json.dumps(summary, indent=2, default=str)
+    return json.dumps(summary, indent=2, default=str)[:4000]  # cap at 4000 chars
 
 def safe_exec_fix(df, fix_code):
     allowed_globals = {
         "df": df.copy(), "pd": pd, "np": np,
         "__builtins__": {
             "len": len, "int": int, "float": float,
-            "str": str, "list": list, "dict": dict,
-            "True": True, "False": False, "None": None
+            "str": str, "list": list, "True": True,
+            "False": False, "None": None
         }
     }
     exec(fix_code, allowed_globals)
     return allowed_globals["df"]
 
-def agent_clean_csv(csv_text, max_iterations=10, auto_fix_confidence=["high", "medium"]):
+def agent_clean_csv(csv_text, max_iterations=1):
     try:
         df = pd.read_csv(StringIO(csv_text))
-    except UnicodeDecodeError:
+    except Exception:
         df = pd.read_csv(StringIO(csv_text.encode('latin-1').decode('utf-8', errors='replace')))
 
     rows_before = len(df)
     cleaning_log = []
     flags_for_human = []
-    iteration = 0
 
-    while iteration < max_iterations:
-        iteration += 1
-        data_summary = summarise_df(df, cleaning_log)
-
-        inspect_msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
-            system=CLEANING_AGENT_PROMPT,
-            messages=[{"role": "user", "content": f"Inspect this dataset:\n\n{data_summary}"}]
-        )
-
-        raw = inspect_msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+    for iteration in range(1, max_iterations + 1):
         try:
+            data_summary = summarise_df(df, cleaning_log)
+            msg = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=500,
+                system=CLEANING_AGENT_PROMPT,
+                messages=[{"role": "user", "content": f"Inspect:\n{data_summary}"}]
+            )
+            raw = msg.content[0].text.strip().replace("```json","").replace("```","").strip()
             decision = json.loads(raw)
-        except json.JSONDecodeError:
+        except Exception as e:
+            cleaning_log.append({"iteration": iteration, "action": f"error: {str(e)}"})
             break
 
         if not decision.get("issue_found", False):
             break
 
-        issue_type = decision.get("issue_type", "unknown")
-        description = decision.get("description", "")
         confidence = decision.get("confidence", "low")
         needs_review = decision.get("needs_human_review", False)
         fix_code = decision.get("fix_code", "")
+        description = decision.get("description", "")
 
-        if needs_review or confidence not in auto_fix_confidence:
-            flag_entry = {
-                "iteration": iteration, "issue_type": issue_type,
-                "column": decision.get("column"), "description": description,
-                "reasoning": decision.get("reasoning"),
-                "review_reason": decision.get("human_review_reason"),
-                "action": "skipped — flagged for human review"
-            }
-            flags_for_human.append(flag_entry)
-            cleaning_log.append(flag_entry)
-            continue
-
-        rows_before_fix = len(df)
-        try:
-            df = safe_exec_fix(df, fix_code)
-            rows_after_fix = len(df)
-        except Exception as e:
-            cleaning_log.append({
-                "iteration": iteration, "issue_type": issue_type,
-                "description": description, "action": f"fix_failed: {str(e)}"
+        if needs_review or confidence == "low":
+            flags_for_human.append({
+                "iteration": iteration,
+                "description": description,
+                "action": "flagged for human review"
             })
+            cleaning_log.append({"iteration": iteration, "description": description, "action": "flagged"})
             continue
 
-        col_stats_after = summarise_df(df, [])
-        verify_msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=200,
-            system=VERIFY_PROMPT,
-            messages=[{"role": "user", "content": f"Fix: {description}\nCode: {fix_code}\nAfter: {col_stats_after[:500]}"}]
-        )
-        verify_raw = verify_msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
         try:
-            verify = json.loads(verify_raw)
-        except:
-            verify = {"verified": True, "note": "verification parse error"}
-
-        log_entry = {
-            "iteration": iteration, "issue_type": issue_type,
-            "column": decision.get("column"), "description": description,
-            "reasoning": decision.get("reasoning"), "confidence": confidence,
-            "fix_code": fix_code, "rows_before": rows_before_fix,
-            "rows_after": rows_after_fix, "verified": verify.get("verified"),
-            "verify_note": verify.get("note"), "action": "applied"
-        }
-        cleaning_log.append(log_entry)
+            rows_before_fix = len(df)
+            df = safe_exec_fix(df, fix_code)
+            cleaning_log.append({
+                "iteration": iteration,
+                "issue_type": decision.get("issue_type"),
+                "description": description,
+                "fix_code": fix_code,
+                "rows_before": rows_before_fix,
+                "rows_after": len(df),
+                "action": "applied"
+            })
+        except Exception as e:
+            cleaning_log.append({"iteration": iteration, "description": description, "action": f"fix_failed: {str(e)}"})
 
     return {
         "clean_csv": df.to_csv(index=False),
         "cleaning_log": cleaning_log,
         "flags_for_human": flags_for_human,
-        "iterations": iteration,
         "rows_before": rows_before,
         "rows_after": len(df)
     }
 
 # ── STEP 3: ANALYSIS ──────────────────────────────────────────────────────────
 ANALYSIS_SYSTEM_PROMPT = """
-You are a senior epidemiological data analyst. The dataset is global Monkeypox tracking data from Our World in Data.
+You are a senior epidemiological data analyst. Dataset: global Monkeypox tracking data.
+Columns: location, date, iso_code, total_cases, total_deaths, new_cases, new_deaths,
+new_cases_smoothed, new_deaths_smoothed, new_cases_per_million, total_cases_per_million,
+total_deaths_per_million.
 
-Columns:
-- location: country or region name
-- date: date of record (YYYY-MM-DD)
-- iso_code: country ISO code
-- total_cases: cumulative total cases
-- total_deaths: cumulative total deaths
-- new_cases: new cases on that date
-- new_deaths: new deaths on that date
-- new_cases_smoothed: 7-day smoothed new cases
-- new_deaths_smoothed: 7-day smoothed new deaths
-- new_cases_per_million: new cases per million population
-- total_cases_per_million: total cases per million population
-- new_cases_smoothed_per_million: smoothed new cases per million
-- new_deaths_per_million: new deaths per million
-- total_deaths_per_million: total deaths per million
-- new_deaths_smoothed_per_million: smoothed new deaths per million
-
-Analyse the data and return ONLY a valid JSON object with this exact structure:
+Return ONLY a valid JSON object:
 {
-  "period": "date range covered e.g. May 2022 - Dec 2023",
+  "period": "date range e.g. May 2022 - Dec 2023",
   "row_count": 0,
   "kpis": {
     "total_global_cases": 0,
@@ -219,34 +166,22 @@ Analyse the data and return ONLY a valid JSON object with this exact structure:
     "peak_daily_new_cases": 0,
     "countries_affected": 0
   },
-  "trends": [
-    "trend observation 1",
-    "trend observation 2",
-    "trend observation 3"
-  ],
-  "anomalies": [
-    "anomaly or unusual pattern description"
-  ],
-  "top_items": [
-    {"name": "location name", "value": 0, "label": "total_cases"}
-  ],
-  "recommendations": [
-    "public health recommendation 1",
-    "public health recommendation 2",
-    "public health recommendation 3"
-  ]
+  "trends": ["trend 1", "trend 2", "trend 3"],
+  "anomalies": ["anomaly 1"],
+  "top_items": [{"name": "location", "value": 0, "label": "total_cases"}],
+  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"]
 }
-Return ONLY the JSON object, no markdown, no explanation.
+No markdown. No explanation. JSON only.
 """
 
 def analyse_with_claude(clean_csv):
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1500,
+        max_tokens=1000,
         system=ANALYSIS_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"Analyse this dataset:\n\n{clean_csv[:8000]}"}]
+        messages=[{"role": "user", "content": f"Analyse:\n\n{clean_csv[:6000]}"}]
     )
-    raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+    raw = msg.content[0].text.strip().replace("```json","").replace("```","").strip()
     return json.loads(raw)
 
 # ── STEP 4: DASHBOARD ─────────────────────────────────────────────────────────
@@ -255,61 +190,58 @@ def generate_dashboard(insights, company=COMPANY_NAME):
 Create a complete self-contained HTML dashboard for {company}.
 Use Chart.js from https://cdn.jsdelivr.net/npm/chart.js
 Include:
-- Header with company name and period: {insights.get('period','')}
+- Header with title and period: {insights.get('period','')}
 - KPI cards: {json.dumps(insights.get('kpis',{}))}
-- Bar chart for top items: {json.dumps(insights.get('top_items',[]))}
-- Trends and anomalies sections
-- Recommendations section
-Use a dark theme (#0f172a background). Make it visually polished.
-Return ONLY the complete HTML, no explanation, no markdown fences.
+- Bar chart for top items: {json.dumps(insights.get('top_items',[])[:5])}
+- Trends list and recommendations list
+Dark theme (#0f172a). Clean and professional.
+Return ONLY complete HTML. No markdown. No explanation.
 """
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=4000,
+        max_tokens=3000,
         messages=[{"role": "user", "content": prompt}]
     )
-    html = msg.content[0].text.strip().replace("```html", "").replace("```", "").strip()
-    return html
+    return msg.content[0].text.strip().replace("```html","").replace("```","").strip()
 
 # ── STEP 5: REPORT ────────────────────────────────────────────────────────────
 REPORT_PROMPT = """
-Write a professional business analytics report based on these insights.
-Use these exact section headings (start each with #):
+Write a professional analytics report. Use these headings (prefix with #):
 # Executive Summary
 # Key Performance Indicators
 # Trend Analysis
 # Anomalies & Risks
 # Strategic Recommendations
 
-Be concise, data-driven, and action-oriented.
-Write for senior business managers. No jargon.
+Concise, data-driven, for senior managers.
 Insights: {insights}
 """
 
 def write_report(insights):
-    prompt = REPORT_PROMPT.format(insights=json.dumps(insights, indent=2))
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}]
+        max_tokens=1500,
+        messages=[{"role": "user", "content": REPORT_PROMPT.format(insights=json.dumps(insights))}]
     )
     return msg.content[0].text
 
 def make_docx(report_text, insights):
     doc = Document()
     title = doc.add_heading(f"{COMPANY_NAME} — Analytics Report", 0)
-    title.runs[0].font.color.rgb = RGBColor(0x1a, 0x18, 0x14)
-    doc.add_paragraph(f"Period: {insights.get('period', 'N/A')} | Rows analysed: {insights.get('row_count', 'N/A')}")
+    if title.runs:
+        title.runs[0].font.color.rgb = RGBColor(0x1a, 0x18, 0x14)
+    doc.add_paragraph(f"Period: {insights.get('period','N/A')} | Rows: {insights.get('row_count','N/A')}")
 
     doc.add_heading("KPI Snapshot", 1)
     kpis = insights.get("kpis", {})
     table = doc.add_table(rows=1, cols=2)
     table.style = 'Table Grid'
     hdr = table.rows[0].cells
-    hdr[0].text = "Metric"; hdr[1].text = "Value"
+    hdr[0].text = "Metric"
+    hdr[1].text = "Value"
     for k, v in kpis.items():
         row = table.add_row().cells
-        row[0].text = str(k).replace("_", " ").title()
+        row[0].text = str(k).replace("_"," ").title()
         row[1].text = str(v)
 
     for line in report_text.split("\n"):
@@ -320,7 +252,7 @@ def make_docx(report_text, insights):
             doc.add_heading(line[2:], 1)
         elif line.startswith("## "):
             doc.add_heading(line[3:], 2)
-        elif line.startswith("- ") or line.startswith("• "):
+        elif line.startswith("- ") or line.startswith("* "):
             doc.add_paragraph(line[2:], style='List Bullet')
         else:
             doc.add_paragraph(line)
@@ -332,70 +264,66 @@ def make_docx(report_text, insights):
 # ── STEP 6: SLIDES ────────────────────────────────────────────────────────────
 def make_slides(insights, report_text):
     slide_prompt = f"""
-Create a slide deck plan for a business analytics presentation.
-Return ONLY a JSON array, no markdown. Each slide object:
-{{
-  "title": "Slide title",
-  "bullets": ["Point 1", "Point 2", "Point 3"],
-  "headline_stat": "Key number to highlight",
-  "notes": "Speaker notes"
-}}
-Generate 6-8 slides covering: title, KPIs, trends, anomalies, top items, recommendations, next steps.
-Data: {json.dumps(insights, indent=2)}
+Create a slide deck plan. Return ONLY a JSON array, no markdown.
+Each slide: {{"title": "...", "bullets": ["..."], "headline_stat": "...", "notes": "..."}}
+6 slides: title, KPIs, trends, anomalies, top locations, recommendations.
+Data: {json.dumps(insights)}
 """
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=2000,
+        max_tokens=1500,
         messages=[{"role": "user", "content": slide_prompt}]
     )
-    raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+    raw = msg.content[0].text.strip().replace("```json","").replace("```","").strip()
     slides_plan = json.loads(raw)
 
     prs = Presentation()
     prs.slide_width = Inches(13.33)
     prs.slide_height = Inches(7.5)
-    blank_layout = prs.slide_layouts[6]
+    blank = prs.slide_layouts[6]
 
-    for slide_data in slides_plan:
-        slide = prs.slides.add_slide(blank_layout)
+    for sd in slides_plan:
+        slide = prs.slides.add_slide(blank)
         bg = slide.background.fill
         bg.solid()
         bg.fore_color.rgb = PptxRGB(0x0f, 0x17, 0x2a)
 
+        # Title
         txb = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12), Inches(1))
         tf = txb.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
-        p.text = slide_data.get("title", "")
+        p.text = sd.get("title", "")
         if p.runs:
             p.runs[0].font.size = Pt(28)
             p.runs[0].font.bold = True
             p.runs[0].font.color.rgb = PptxRGB(0xff, 0xff, 0xff)
 
-        stat = slide_data.get("headline_stat", "")
+        # Stat
+        stat = sd.get("headline_stat", "")
         if stat:
             stb = slide.shapes.add_textbox(Inches(9), Inches(1.2), Inches(3.8), Inches(1.5))
-            stf = stb.text_frame
-            sp = stf.paragraphs[0]
+            sp = stb.text_frame.paragraphs[0]
             sp.text = stat
             if sp.runs:
-                sp.runs[0].font.size = Pt(36)
+                sp.runs[0].font.size = Pt(32)
                 sp.runs[0].font.bold = True
                 sp.runs[0].font.color.rgb = PptxRGB(0x4e, 0xcd, 0xc4)
 
-        bullets = slide_data.get("bullets", [])
+        # Bullets
+        bullets = sd.get("bullets", [])
         if bullets:
             bxb = slide.shapes.add_textbox(Inches(0.5), Inches(1.6), Inches(8), Inches(5))
             btf = bxb.text_frame
             btf.word_wrap = True
-            for j, bullet in enumerate(bullets):
+            for j, b in enumerate(bullets):
                 bp = btf.paragraphs[0] if j == 0 else btf.add_paragraph()
-                bp.text = f"->  {bullet}"
+                bp.text = f"->  {b}"
                 if bp.runs:
-                    bp.runs[0].font.size = Pt(16)
+                    bp.runs[0].font.size = Pt(15)
                     bp.runs[0].font.color.rgb = PptxRGB(0xcc, 0xcc, 0xee)
 
-        notes = slide_data.get("notes", "")
+        notes = sd.get("notes", "")
         if notes:
             slide.notes_slide.notes_text_frame.text = notes
 
@@ -403,30 +331,29 @@ Data: {json.dumps(insights, indent=2)}
     prs.save(buf)
     return base64.b64encode(buf.getvalue()).decode()
 
-# ── STEP 7: /run ENDPOINT ─────────────────────────────────────────────────────
+# ── /run ENDPOINT ─────────────────────────────────────────────────────────────
 @app.route("/run", methods=["POST"])
 def run_pipeline():
-    data = request.get_json()
-    csv_text = data.get("csv", "")
-    company = data.get("company", COMPANY_NAME)
-
-    if not csv_text:
-        return jsonify({"error": "No CSV provided"}), 400
-
-    # Sample large datasets to avoid memory issues
     try:
-        df_check = pd.read_csv(StringIO(csv_text))
-        if len(df_check) > 2000:
-            df_check = df_check.sample(n=2000, random_state=42)
-            csv_text = df_check.to_csv(index=False)
-    except:
-        pass
+        data = request.get_json(force=True, silent=True) or {}
+        csv_text = data.get("csv", "")
+        company = data.get("company", COMPANY_NAME)
 
-    try:
-        cleaning_result = agent_clean_csv(csv_text, max_iterations=1)
+        if not csv_text:
+            return jsonify({"error": "No CSV provided"}), 400
+
+        # Sample down to MAX_ROWS to stay within free tier memory
+        try:
+            df_raw = pd.read_csv(StringIO(csv_text))
+            if len(df_raw) > MAX_ROWS:
+                df_raw = df_raw.sample(n=MAX_ROWS, random_state=42)
+            csv_text = df_raw.to_csv(index=False)
+        except Exception as e:
+            return jsonify({"error": f"CSV parse error: {str(e)}"}), 400
+
+        # Run pipeline steps
+        cleaning_result = agent_clean_csv(csv_text, max_iterations=MAX_ITERATIONS)
         clean_csv = cleaning_result["clean_csv"]
-        cleaning_log = cleaning_result["cleaning_log"]
-        flags = cleaning_result["flags_for_human"]
 
         insights = analyse_with_claude(clean_csv)
         dashboard_html = generate_dashboard(insights, company)
@@ -443,12 +370,11 @@ def run_pipeline():
             "dashboard_html": dashboard_html,
             "dash_filename": f"Dashboard_{date_str}.html",
             "insights": insights,
-            "cleaning_log": cleaning_log,
-            "flags_for_human": flags,
+            "cleaning_log": cleaning_result["cleaning_log"],
+            "flags_for_human": cleaning_result["flags_for_human"],
             "cleaning_stats": {
                 "rows_before": cleaning_result["rows_before"],
-                "rows_after": cleaning_result["rows_after"],
-                "iterations": cleaning_result["iterations"]
+                "rows_after": cleaning_result["rows_after"]
             },
             "status": "success"
         })
