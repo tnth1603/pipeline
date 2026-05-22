@@ -413,8 +413,17 @@ def run_pipeline():
     if not csv_text:
         return jsonify({"error": "No CSV provided"}), 400
 
+    # Sample large datasets to avoid memory issues
     try:
-        cleaning_result = agent_clean_csv(csv_text, max_iterations=10)
+        df_check = pd.read_csv(StringIO(csv_text))
+        if len(df_check) > 10000:
+            df_check = df_check.sample(n=10000, random_state=42)
+            csv_text = df_check.to_csv(index=False)
+    except:
+        pass
+
+    try:
+        cleaning_result = agent_clean_csv(csv_text, max_iterations=3)
         clean_csv = cleaning_result["clean_csv"]
         cleaning_log = cleaning_result["cleaning_log"]
         flags = cleaning_result["flags_for_human"]
