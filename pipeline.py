@@ -1,7 +1,16 @@
+from flask import Flask, request, jsonify
+import anthropic, json, os, base64
 import pandas as pd
 import numpy as np
-import json, re
-from io import StringIO
+from io import StringIO, BytesIO
+from docx import Document
+from docx.shared import Pt, RGBColor
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor as PptxRGB
+
+app = Flask(__name__)
+client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── AGENT SYSTEM PROMPT ───────────────────────────────────────────────
 CLEANING_AGENT_PROMPT = """
