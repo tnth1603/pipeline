@@ -1,0 +1,6 @@
+location,date,iso_code,total_cases,total_deaths,new_cases,new_deaths,new_cases_smoothed,new_deaths_smoothed,new_cases_per_million,total_cases_per_million,new_cases_smoothed_per_million,new_deaths_per_million,total_deaths_per_million,new_deaths_smoothed_per_million
+Africa,2022-05-01,OWID_AFR,41.0,2.0,2.0,0.0,0.29,0.0,0.001,0.029,0.0,0.0,0.00141,0.0
+Africa,2022-05-02,OWID_AFR,41.0,2.0,0.0,0.0,0.29,0.0,0.0,0.029,0.0,0.0,0.00141,0.0
+Africa,2022-05-03,OWID_AFR,41.0,2.0,0.0,0.0,0.29,0.0,0.0,0.029,0.0,0.0,0.00141,0.0
+Africa,2022-05-04,OWID_AFR,41.0,2.0,0.0,0.0,0.29,0.0,0.0,0.029,0.0,0.0,0.00141,0.0
+Africa,2022-05-05,OWID_AFR,41.0,2.0,0.0,0.0,0.57,0.0,0.0,0.029,0.0,0.0,0.00141,0.0
