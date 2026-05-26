@@ -117,7 +117,7 @@ def stratified_sample(df_full, max_rows=MAX_ROWS):
 # Runs on full dataset summary stats (not raw rows) to avoid memory issues
 # ─────────────────────────────────────────────────────────────────────────────
 CLEANING_AGENT_PROMPT = """
-You are an expert data cleaning agent. You receive a statistical summary of a dataset.
+You are an expert data cleaning agent. You will receive a statistical summary of a dataset.
 Identify ONE data quality issue that has not yet been fixed.
 Return ONLY a JSON object:
 
@@ -128,7 +128,12 @@ Return ONLY a JSON object:
   "description": "Plain English description of the issue",
   "reasoning": "Why this is an error, not valid data",
   "confidence": "high | medium | low",
-  "fix_code": "Single Python line using df variable. Must assign back to df. Example: df['col'] = df['col'].fillna(0)",
+  "action": {
+    "type": "one of: fillna_median | fillna_zero | fillna_mode | drop_duplicates | drop_nulls | replace_value | normalize_case | to_datetime | clip_outliers",
+    "column": "column name to apply action to, or 'all'",
+    "value": "only needed for replace_value — the value to replace",
+    "replacement": "only needed for replace_value — what to replace it with"
+  },
   "needs_human_review": false,
   "human_review_reason": ""
 }
@@ -137,9 +142,9 @@ If no issues remain: { "issue_found": false }
 
 Rules:
 - ONE issue per response only
-- fix_code must be a single line assigning back to df
-- Never drop more than 5% of rows without flagging
-- Consider epidemiological context: zeroes in new_cases are valid (no new cases that day)
+- action.type must be exactly one of the allowed values listed above
+- Never suggest dropping more than 5% of rows
+- Consider epidemiological context: zeroes in new_cases are valid
 """
 
 VERIFY_PROMPT = """
@@ -169,19 +174,68 @@ def summarise_df(df, fixed_so_far):
         summary["columns"][col] = col_info
     return json.dumps(summary, indent=2, default=str)[:4000]
 
-def safe_exec_fix(df, fix_code):
-    """Execute Claude-generated fix code safely."""
-    allowed = {
-        "df": df.copy(), "pd": pd, "np": np,
-        "__builtins__": {
-            "len": len, "int": int, "float": float,
-            "str": str, "list": list, "abs": abs,
-            "round": round, "min": min, "max": max,
-            "True": True, "False": False, "None": None
-        }
-    }
-    exec(fix_code, allowed)
-    return allowed["df"]
+# Pre-approved safe action map — Claude picks from this list only
+# No exec(), no arbitrary code, no sandbox escaping possible
+
+SAFE_ACTIONS = {
+    "fillna_median": lambda df, col, **_: df.assign(
+        **{col: df[col].fillna(df[col].median())}
+    ) if col in df.columns and pd.api.types.is_numeric_dtype(df[col]) else df,
+
+    "fillna_zero": lambda df, col, **_: df.assign(
+        **{col: df[col].fillna(0)}
+    ) if col in df.columns else df,
+
+    "fillna_mode": lambda df, col, **_: df.assign(
+        **{col: df[col].fillna(df[col].mode()[0])}
+    ) if col in df.columns and not df[col].mode().empty else df,
+
+    "drop_duplicates": lambda df, **_: df.drop_duplicates(),
+
+    "drop_nulls": lambda df, col, **_: df.dropna(
+        subset=[col]
+    ) if col in df.columns else df,
+
+    "replace_value": lambda df, col, value, replacement, **_: df.assign(
+        **{col: df[col].replace(value, replacement)}
+    ) if col in df.columns else df,
+
+    "normalize_case": lambda df, col, **_: df.assign(
+        **{col: df[col].str.strip().str.title()}
+    ) if col in df.columns and df[col].dtype == object else df,
+
+    "to_datetime": lambda df, col, **_: df.assign(
+        **{col: pd.to_datetime(df[col], errors='coerce')}
+    ) if col in df.columns else df,
+
+    "clip_outliers": lambda df, col, **_: df.assign(
+        **{col: df[col].clip(
+            lower=df[col].quantile(0.01),
+            upper=df[col].quantile(0.99)
+        )}
+    ) if col in df.columns and pd.api.types.is_numeric_dtype(df[col]) else df,
+}
+
+def safe_exec_fix(df, action):
+    """
+    Execute a pre-approved cleaning action from the SAFE_ACTIONS map.
+    Claude returns a structured action dict — we look it up and run it.
+    No exec(), no eval(), no arbitrary code execution.
+    """
+    action_type = action.get("type", "")
+    col         = action.get("column", "")
+    value       = action.get("value", None)
+    replacement = action.get("replacement", None)
+
+    if action_type not in SAFE_ACTIONS:
+        raise ValueError(f"Unknown action type: '{action_type}'. Must be one of: {list(SAFE_ACTIONS.keys())}")
+
+    return SAFE_ACTIONS[action_type](
+        df,
+        col=col,
+        value=value,
+        replacement=replacement
+    )
 
 def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
     """
@@ -209,34 +263,38 @@ def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
         if not decision.get("issue_found", False):
             break
 
-        confidence   = decision.get("confidence", "low")
-        needs_review = decision.get("needs_human_review", False)
-        fix_code     = decision.get("fix_code", "")
-        description  = decision.get("description", "")
+ action        = decision.get("action", {})
+        description   = decision.get("description", "")
+        confidence    = decision.get("confidence", "low")
+        needs_review  = decision.get("needs_human_review", False)
 
-        if needs_review or confidence == "low":
-            entry = {"iteration": iteration, "description": description, "action": "flagged"}
+        if needs_review or confidence == "low" or not action:
+            entry = {
+                "iteration":  iteration,
+                "description": description,
+                "action":     "flagged for human review"
+            }
             flags.append(entry)
             cleaning_log.append(entry)
             continue
 
         try:
             rows_before_fix = len(df)
-            df = safe_exec_fix(df, fix_code)
+            df = safe_exec_fix(df, action)
             cleaning_log.append({
-                "iteration":  iteration,
-                "issue_type": decision.get("issue_type"),
+                "iteration":   iteration,
+                "issue_type":  decision.get("issue_type"),
                 "description": description,
-                "fix_code":   fix_code,
+                "action_taken": action,
                 "rows_before": rows_before_fix,
                 "rows_after":  len(df),
-                "action":     "applied"
+                "action":      "applied"
             })
         except Exception as e:
             cleaning_log.append({
-                "iteration":  iteration,
+                "iteration":   iteration,
                 "description": description,
-                "action":     f"fix_failed: {str(e)}"
+                "action":      f"fix_failed: {str(e)}"
             })
 
     return {
@@ -477,8 +535,12 @@ Use this data: {json.dumps(insights)}
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/run", methods=["POST"])
 def run_pipeline():
+    # Verify secret token — reject anyone who isn't Make.com
+    token = request.headers.get("X-Pipeline-Secret", "")
+    if token != os.environ.get("PIPELINE_SECRET", ""):
+        return jsonify({"error": "Unauthorized"}), 401
+
     try:
-        # Parse incoming request
         data     = request.get_json(force=True, silent=True) or {}
         csv_text = data.get("csv", "")
         company  = data.get("company", COMPANY_NAME)
