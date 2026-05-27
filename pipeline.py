@@ -263,16 +263,16 @@ def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
         if not decision.get("issue_found", False):
             break
 
- action        = decision.get("action", {})
-        description   = decision.get("description", "")
-        confidence    = decision.get("confidence", "low")
-        needs_review  = decision.get("needs_human_review", False)
+        action       = decision.get("action", {})
+        description  = decision.get("description", "")
+        confidence   = decision.get("confidence", "low")
+        needs_review = decision.get("needs_human_review", False)
 
         if needs_review or confidence == "low" or not action:
             entry = {
-                "iteration":  iteration,
+                "iteration":   iteration,
                 "description": description,
-                "action":     "flagged for human review"
+                "action":      "flagged for human review"
             }
             flags.append(entry)
             cleaning_log.append(entry)
@@ -282,13 +282,13 @@ def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
             rows_before_fix = len(df)
             df = safe_exec_fix(df, action)
             cleaning_log.append({
-                "iteration":   iteration,
-                "issue_type":  decision.get("issue_type"),
-                "description": description,
+                "iteration":    iteration,
+                "issue_type":   decision.get("issue_type"),
+                "description":  description,
                 "action_taken": action,
-                "rows_before": rows_before_fix,
-                "rows_after":  len(df),
-                "action":      "applied"
+                "rows_before":  rows_before_fix,
+                "rows_after":   len(df),
+                "action":       "applied"
             })
         except Exception as e:
             cleaning_log.append({
