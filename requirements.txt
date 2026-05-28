@@ -2,7 +2,5 @@ anthropic
 pandas
 flask
 python-docx
-python-pptx
-weasyprint
 gunicorn
 numpy
