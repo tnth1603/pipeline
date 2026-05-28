@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Global Monkeypox Tracker</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f172a;
+            color: white;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px 0;
+            border-bottom: 2px solid #4ecdc4;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            color: #4ecdc4;
+        }
+        
+        .period {
+            font-size: 1.1em;
+            color: #e2e8f0;
+        }
+        
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        
+        .kpi-card {
+            background: linear-gradient(135deg, #1e293b, #334155);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            border: 1px solid #475569;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        
+        .kpi-value {
+            font-size: 2.2em;
+            font-weight: bold;
+            color: #4ecdc4;
+            margin-bottom: 5px;
+        }
+        
+        .kpi-label {
+            font-size: 0.9em;
+            color: #cbd5e1;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .chart-section {
+            background: linear-gradient(135deg, #1e293b, #334155);
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 40px;
+            border: 1px solid #475569;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        
+        .chart-title {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            color: #4ecdc4;
+            text-align: center;
+        }
+        
+        .info-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 30px;
+        }
+        
+        .info-card {
+            background: linear-gradient(135deg, #1e293b, #334155);
+            padding: 25px;
+            border-radius: 10px;
+            border: 1px solid #475569;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        
+        .info-card h3 {
+            font-size: 1.4em;
+            margin-bottom: 15px;
+            color: #4ecdc4;
+            border-bottom: 2px solid #4ecdc4;
+            padding-bottom: 5px;
+        }
+        
+        .info-card ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        
+        .info-card li {
+            margin-bottom: 10px;
+            padding-left: 20px;
+            position: relative;
+        }
+        
+        .info-card li:before {
+            content: "→";
+            color: #4ecdc4;
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+        }
+        
+        .percentage {
+            color: #10b981;
+        }
+        
+        .chart-container {
+            width: 100%;
+            overflow: hidden;
+            position: relative;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Global Monkeypox Tracker</h1>
+            <p class="period">Period: 2022-05-01 to 2026-04-30</p>
+        </div>
+        
+        <div class="kpi-grid">
+            <div class="kpi-card">
+                <div class="kpi-value">180,545</div>
+                <div class="kpi-label">Total Global Cases</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value">506</div>
+                <div class="kpi-label">Total Global Deaths</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value">0.28%</div>
+                <div class="kpi-label">Case Fatality Rate</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value">5,997</div>
+                <div class="kpi-label">Peak Daily Cases</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value">3.21</div>
+                <div class="kpi-label">Average Daily Cases</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value">0.01</div>
+                <div class="kpi-label">Average Daily Deaths</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value">151</div>
+                <div class="kpi-label">Countries Affected</div>
+            </div>
+        </div>
+        
+        <div class="chart-section">
+            <h2 class="chart-title">Top 5 Countries by Total Cases</h2>
+            <div class="chart-container">
+                <canvas id="chart" width="1100" height="420"></canvas>
+            </div>
+        </div>
+        
+        <div class="info-section">
+            <div class="info-card">
+                <h3>Key Trends</h3>
+                <ul>
+                    <li>United States leads with 37,789 cases (21% of global total)</li>
+                    <li>Democratic Republic of Congo follows closely with 34,054 cases</li>
+                    <li>Top 5 countries account for 58% of all global cases</li>
+                    <li>Case fatality rate remains low at 0.28%</li>
+                    <li>Peak transmission occurred with 5,997 daily cases</li>
+                    <li>Current daily average significantly reduced to 3.21 cases</li>
+                    <li>Outbreak has spread to 151 countries worldwide</li>
+                </ul>
+            </div>
+            
+            <div class="info-card">
+                <h3>Public Health Recommendations</h3>
+                <ul>
+                    <li>Maintain enhanced surveillance systems in all affected regions</li>
+                    <li>Prioritize vaccination campaigns in high-risk communities</li>
+                    <li>Strengthen contact tracing capabilities in top affected countries</li>
+                    <li>Improve diagnostic capacity and laboratory networks</li>
+                    <li>Continue public awareness campaigns about transmission prevention</li>
+                    <li>Enhance international coordination for outbreak response</li>
+                    <li>Monitor for potential viral mutations and variants</li>
+                    <li>Ensure equitable access to treatments and vaccines globally</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.addEventListener('load', function() {
+            const ctx = document.getElementById('chart').getContext('2d');
+            
+            const data = {
+                labels: ['United States', 'Democratic Republic\nof Congo', 'Brazil', 'Spain', 'Uganda'],
+                datasets: [{
+                    label: 'Total Cases',
+                    data: [37789, 34054, 15027, 9517, 8512],
+                    backgroundColor: '#4ecdc4',
+                    borderColor: '#4ecdc4',
+                    borderWidth: 1
+                }]
+            };
+            
+            const config = {
+                type: 'bar',
+                data: data,
+                options: {
+                    animation: false,
+                    responsive: false,
+                    maintainAspectRatio: false,
+                    layout: { 
+                        padding: { 
+                            top: 10, 
+                            right: 30, 
+                            bottom: 10, 
+                            left: 10 
+                        } 
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        x: { 
+                            grid: { 
+                                drawBorder: false, 
+                                color: 'rgba(255,255,255,0.08)' 
+                            },
+                            ticks: {
+                                color: '#e2e8f0',
+                                font: {
+                                    size: 12
+                                }
+                            }
+                        },
+                        y: { 
+                            grid: { 
+                                drawBorder: false, 
+                                color: 'rgba(255,255,255,0.08)' 
+                            },
+                            ticks: { 
+                                maxTicksLimit: 6,
+                                color: '#e2e8f0',
+                                font: {
+                                    size: 12
+                                },
+                                callback: function(value) {
+                                    return value.toLocaleString();
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            
+            new Chart(ctx, config);
+            document.body.setAttribute('data-chart-ready', 'true');
+        });
+    </script>
+</body>
+</html>
