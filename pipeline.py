@@ -39,59 +39,79 @@ def call_claude(messages, max_tokens=1000, system=None):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER: Parse JSON from Claude safely
-# FIX: handles empty responses, markdown fences, and trailing text
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_claude_json(raw):
-    """
-    Robustly parse JSON from Claude response.
-    Handles: ```json fences, trailing text, empty responses.
-    """
     if not raw or not raw.strip():
         raise ValueError("Claude returned empty response")
-
-    # Strip markdown fences
     cleaned = raw.strip()
     cleaned = re.sub(r'^```json\s*', '', cleaned)
     cleaned = re.sub(r'^```\s*', '', cleaned)
     cleaned = re.sub(r'\s*```$', '', cleaned)
     cleaned = cleaned.strip()
-
-    # Try direct parse first
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
-
-    # Try to extract first JSON object from response
     match = re.search(r'\{.*\}', cleaned, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
-
-    # Try to extract first JSON array
     match = re.search(r'\[.*\]', cleaned, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
+    raise ValueError(f"Could not parse JSON: {cleaned[:200]}")
 
-    raise ValueError(f"Could not parse JSON from Claude response: {cleaned[:200]}")
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: Convert HTML dashboard to PNG screenshot
+# Requires SCREENSHOT_API_KEY in Render environment variables
+# Free tier at screenshotone.com — 100 screenshots/month
+# ─────────────────────────────────────────────────────────────────────────────
+def html_to_screenshot(html_content):
+    import urllib.request
+    api_key = os.environ.get("SCREENSHOT_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        payload = json.dumps({
+            "access_key":           api_key,
+            "html":                 html_content[:60000],
+            "viewport_width":       1400,
+            "viewport_height":      900,
+            "full_page":            True,
+            "format":               "png",
+            "block_ads":            True,
+            "block_cookie_banners": True,
+            "delay":                2
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.screenshotone.com/take",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            if resp.status == 200:
+                return base64.b64encode(resp.read()).decode()
+        return None
+    except Exception:
+        return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER: Pre-compute global stats (domain-agnostic)
 # ─────────────────────────────────────────────────────────────────────────────
 def compute_global_stats(df_full):
     stats = {
-        "total_rows":    int(len(df_full)),
-        "total_columns": int(len(df_full.columns)),
-        "column_names":  list(df_full.columns),
-        "date_range":    "N/A",
+        "total_rows":       int(len(df_full)),
+        "total_columns":    int(len(df_full.columns)),
+        "column_names":     list(df_full.columns),
+        "date_range":       "N/A",
         "unique_locations": 0,
     }
-
     for date_col in ['date', 'Date', 'DATE', 'timestamp', 'period']:
         if date_col in df_full.columns:
             try:
@@ -99,7 +119,6 @@ def compute_global_stats(df_full):
             except Exception:
                 pass
             break
-
     for loc_col in ['location', 'country', 'region', 'category', 'Location', 'Country']:
         if loc_col in df_full.columns:
             try:
@@ -108,7 +127,6 @@ def compute_global_stats(df_full):
             except Exception:
                 pass
             break
-
     numeric_cols = df_full.select_dtypes(include='number').columns.tolist()
     stats["numeric_summaries"] = {}
     for col in numeric_cols[:8]:
@@ -121,7 +139,6 @@ def compute_global_stats(df_full):
             }
         except Exception:
             pass
-
     try:
         loc_col = stats.get("location_column", None)
         if loc_col and numeric_cols:
@@ -135,11 +152,10 @@ def compute_global_stats(df_full):
                 .max().nlargest(10).reset_index()
                 .to_dict(orient='records')
             )
-            stats["top_10_items"]    = top10
+            stats["top_10_items"]     = top10
             stats["top_items_metric"] = first_num
     except Exception:
         stats["top_10_items"] = []
-
     try:
         if 'total_cases' in df_full.columns and 'total_deaths' in df_full.columns:
             world = df_full[df_full['location'].str.contains('World|OWID_WRL', na=False)]
@@ -154,7 +170,6 @@ def compute_global_stats(df_full):
                 stats["peak_daily_cases"] = int(peak_row['new_cases'])
     except Exception:
         pass
-
     return stats
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,34 +219,19 @@ Return ONLY a JSON object with NO other text before or after it:
 }
 
 If no issues remain return ONLY: { "issue_found": false }
-
 CRITICAL: Return ONLY the JSON object. No explanation. No markdown. No text before or after.
 """
 
 SAFE_ACTIONS = {
-    "fillna_median": lambda df, col, **_: df.assign(
-        **{col: df[col].fillna(df[col].median())}
-    ) if col in df.columns and pd.api.types.is_numeric_dtype(df[col]) else df,
-    "fillna_zero": lambda df, col, **_: df.assign(
-        **{col: df[col].fillna(0)}
-    ) if col in df.columns else df,
-    "fillna_mode": lambda df, col, **_: df.assign(
-        **{col: df[col].fillna(df[col].mode()[0])}
-    ) if col in df.columns and not df[col].mode().empty else df,
+    "fillna_median":   lambda df, col, **_: df.assign(**{col: df[col].fillna(df[col].median())}) if col in df.columns and pd.api.types.is_numeric_dtype(df[col]) else df,
+    "fillna_zero":     lambda df, col, **_: df.assign(**{col: df[col].fillna(0)}) if col in df.columns else df,
+    "fillna_mode":     lambda df, col, **_: df.assign(**{col: df[col].fillna(df[col].mode()[0])}) if col in df.columns and not df[col].mode().empty else df,
     "drop_duplicates": lambda df, **_: df.drop_duplicates(),
-    "drop_nulls": lambda df, col, **_: df.dropna(subset=[col]) if col in df.columns else df,
-    "replace_value": lambda df, col, value, replacement, **_: df.assign(
-        **{col: df[col].replace(value, replacement)}
-    ) if col in df.columns else df,
-    "normalize_case": lambda df, col, **_: df.assign(
-        **{col: df[col].str.strip().str.title()}
-    ) if col in df.columns and df[col].dtype == object else df,
-    "to_datetime": lambda df, col, **_: df.assign(
-        **{col: pd.to_datetime(df[col], errors='coerce')}
-    ) if col in df.columns else df,
-    "clip_outliers": lambda df, col, **_: df.assign(
-        **{col: df[col].clip(lower=df[col].quantile(0.01), upper=df[col].quantile(0.99))}
-    ) if col in df.columns and pd.api.types.is_numeric_dtype(df[col]) else df,
+    "drop_nulls":      lambda df, col, **_: df.dropna(subset=[col]) if col in df.columns else df,
+    "replace_value":   lambda df, col, value, replacement, **_: df.assign(**{col: df[col].replace(value, replacement)}) if col in df.columns else df,
+    "normalize_case":  lambda df, col, **_: df.assign(**{col: df[col].str.strip().str.title()}) if col in df.columns and df[col].dtype == object else df,
+    "to_datetime":     lambda df, col, **_: df.assign(**{col: pd.to_datetime(df[col], errors='coerce')}) if col in df.columns else df,
+    "clip_outliers":   lambda df, col, **_: df.assign(**{col: df[col].clip(lower=df[col].quantile(0.01), upper=df[col].quantile(0.99))}) if col in df.columns and pd.api.types.is_numeric_dtype(df[col]) else df,
 }
 
 def safe_exec_fix(df, action):
@@ -269,7 +269,6 @@ def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
     rows_before  = len(df)
     cleaning_log = []
     flags        = []
-
     for iteration in range(1, max_iterations + 1):
         try:
             summary  = summarise_df(df, cleaning_log)
@@ -278,26 +277,21 @@ def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
                 messages=[{"role": "user", "content": f"Inspect this dataset summary:\n{summary}"}],
                 max_tokens=500
             )
-            # FIX: use robust JSON parser instead of raw json.loads
             decision = parse_claude_json(raw)
         except Exception as e:
             cleaning_log.append({"iteration": iteration, "action": f"error: {str(e)}"})
             break
-
         if not decision.get("issue_found", False):
             break
-
         action       = decision.get("action", {})
         description  = decision.get("description", "")
         confidence   = decision.get("confidence", "low")
         needs_review = decision.get("needs_human_review", False)
-
         if needs_review or confidence == "low" or not action:
             entry = {"iteration": iteration, "description": description, "action": "flagged for human review"}
             flags.append(entry)
             cleaning_log.append(entry)
             continue
-
         try:
             rows_before_fix = len(df)
             df = safe_exec_fix(df, action)
@@ -312,7 +306,6 @@ def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
             })
         except Exception as e:
             cleaning_log.append({"iteration": iteration, "description": description, "action": f"fix_failed: {str(e)}"})
-
     return {
         "clean_df":        df,
         "cleaning_log":    cleaning_log,
@@ -325,13 +318,9 @@ def agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS):
 # STEP 3: ANALYSIS
 # ─────────────────────────────────────────────────────────────────────────────
 ANALYSIS_SYSTEM_PROMPT = """
-You are a senior data analyst. You will receive:
-1. Pre-computed accurate statistics from the FULL dataset
-2. A sample of raw rows for pattern analysis
-
+You are a senior data analyst. You will receive pre-computed accurate statistics
+from the FULL dataset, and a sample of raw rows for pattern analysis.
 Use the pre-computed stats for all KPI values.
-Use the raw rows only to identify trends and patterns.
-
 Return ONLY a valid JSON object with NO other text:
 {
   "period": "date range covered",
@@ -351,8 +340,6 @@ ACCURATE GLOBAL STATISTICS (from full dataset of {global_stats.get('total_rows',
 
 SAMPLE ROWS FOR PATTERN ANALYSIS:
 {clean_csv[:5000]}
-
-Use the global statistics for all KPI values. Infer domain from column names.
 """
     raw = call_claude(
         system=ANALYSIS_SYSTEM_PROMPT,
@@ -380,9 +367,7 @@ Return ONLY complete HTML. No markdown. No backticks.
     return re.sub(r'^```html\s*|^```\s*|\s*```$', '', html.strip()).strip()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 5: WORD REPORT
-# FIX 1: parse_inline_bold() strips **markdown** and renders real Word bold
-# FIX 2: cleaning log error shows friendly message instead of raw JSON error
+# STEP 5: WORD REPORT — no appendix, no slides
 # ─────────────────────────────────────────────────────────────────────────────
 REPORT_PROMPT = """
 Write a professional analytics report based on these insights.
@@ -393,8 +378,7 @@ Use these exact section headings (prefix each with #):
 # Anomalies & Risk Signals
 # Strategic Recommendations
 
-IMPORTANT: Do NOT use **bold** markdown syntax. Write in plain text only.
-Use plain sentences. No asterisks. No markdown formatting of any kind.
+IMPORTANT: Do NOT use **bold** markdown. Write plain text only. No asterisks.
 Concise, evidence-based, written for senior managers.
 Insights: {insights}
 """
@@ -406,23 +390,19 @@ def write_report(insights):
     )
 
 def parse_inline_bold(paragraph, text):
-    """
-    Parse **bold** markdown and add properly formatted runs to a Word paragraph.
-    Handles the case where Claude ignores the no-markdown instruction.
-    """
+    """Parse **bold** markdown into proper Word bold formatting."""
     parts = re.split(r'\*\*(.+?)\*\*', text)
     for i, part in enumerate(parts):
         if not part:
             continue
         run = paragraph.add_run(part)
         run.font.size = Pt(11)
-        if i % 2 == 1:  # odd index = content inside **
+        if i % 2 == 1:
             run.bold = True
 
-def make_docx(report_text, insights, cleaning_log=None):
+def make_docx(report_text, insights):
     doc = Document()
 
-    # Page margins
     for section in doc.sections:
         section.top_margin    = Inches(1)
         section.bottom_margin = Inches(1)
@@ -468,12 +448,11 @@ def make_docx(report_text, insights, cleaning_log=None):
                         run.font.size = Pt(10)
     doc.add_paragraph("")
 
-    # Report body
+    # Report body — ends cleanly after Strategic Recommendations
     for line in report_text.split("\n"):
         line = line.strip()
         if not line:
             doc.add_paragraph("")
-            continue
         elif line.startswith("# "):
             h = doc.add_heading(line[2:].strip(), 1)
             if h.runs:
@@ -491,8 +470,6 @@ def make_docx(report_text, insights, cleaning_log=None):
         else:
             p = doc.add_paragraph()
             parse_inline_bold(p, line)
-
-    
 
     buf = BytesIO()
     doc.save(buf)
@@ -525,24 +502,26 @@ def run_pipeline():
         cleaning_result = agent_clean_csv(df_sample, max_iterations=MAX_ITERATIONS)
         df_clean        = cleaning_result["clean_df"]
         clean_csv_text  = df_clean.to_csv(index=False)
-        cleaning_log    = cleaning_result["cleaning_log"]
 
         insights       = analyse_with_claude(clean_csv_text, global_stats)
         dashboard_html = generate_dashboard(insights, company)
         report_text    = write_report(insights)
-        docx_b64       = make_docx(report_text, insights, cleaning_log=cleaning_log)
+        docx_b64       = make_docx(report_text, insights)
+        dashboard_png  = html_to_screenshot(dashboard_html)
 
         date_str = pd.Timestamp.today().strftime("%Y-%m-%d")
 
         return jsonify({
-            "docx_b64":        docx_b64,
-            "docx_filename":   f"Report_{date_str}.docx",
-            "dashboard_html":  dashboard_html,
-            "dash_filename":   f"Dashboard_{date_str}.html",
-            "insights":        insights,
-            "global_stats":    global_stats,
-            "cleaning_log":    cleaning_log,
-            "flags_for_human": cleaning_result["flags_for_human"],
+            "docx_b64":          docx_b64,
+            "docx_filename":     f"Report_{date_str}.docx",
+            "dashboard_html":    dashboard_html,
+            "dash_filename":     f"Dashboard_{date_str}.html",
+            "dashboard_png":     dashboard_png,
+            "dash_png_filename": f"Dashboard_{date_str}.png",
+            "insights":          insights,
+            "global_stats":      global_stats,
+            "cleaning_log":      cleaning_result["cleaning_log"],
+            "flags_for_human":   cleaning_result["flags_for_human"],
             "cleaning_stats": {
                 "rows_in_full_dataset": len(df_full),
                 "rows_sampled":         len(df_sample),
