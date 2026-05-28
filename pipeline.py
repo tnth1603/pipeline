@@ -86,6 +86,12 @@ def html_to_screenshot(html_content):
             "format":               "png",
             "block_ads":            True,
             "block_cookie_banners": True,
+            # Wait for the network (CDN Chart.js) to settle before capture.
+            "wait_until":           "networkidle0",
+            # Block until the chart has actually been drawn. The dashboard
+            # sets this attribute right after new Chart(...) completes.
+            "wait_for_selector":    "body[data-chart-ready='true']",
+            # Fallback safety margin in case the selector resolves early.
             "delay":                2
         }).encode("utf-8")
         req = urllib.request.Request(
@@ -94,7 +100,7 @@ def html_to_screenshot(html_content):
             headers={"Content-Type": "application/json"},
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=45) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             if resp.status == 200:
                 return base64.b64encode(resp.read()).decode()
         return None
@@ -361,6 +367,28 @@ Include:
 - Bar chart of top items: {json.dumps(insights.get('top_items',[])[:8])}
 - Trends section and Recommendations section
 Dark professional theme (#0f172a background, white text, teal accents #4ecdc4).
+
+CRITICAL CHART.JS RENDERING RULES (the dashboard is screenshotted by a
+headless browser, so the chart MUST paint its final state immediately):
+1. Give the <canvas> an EXPLICIT width and height attribute, e.g.
+   <canvas id="chart" width="1200" height="420"></canvas>
+2. In the Chart config options set:
+     animation: false,
+     responsive: false,
+     maintainAspectRatio: false
+   so there is no entry animation and the chart does not depend on a
+   resize/layout pass.
+3. Load Chart.js with a normal <script> in <head> (not async/defer), and
+   build the chart inside a window.addEventListener('load', ...) handler so
+   the library is guaranteed to be parsed first.
+4. After the chart is constructed, set a completion flag the screenshot
+   service can wait on:
+     window.addEventListener('load', function() {{
+       // ... new Chart(...) ...
+       document.body.setAttribute('data-chart-ready', 'true');
+     }});
+5. Use a high-contrast bar colour (e.g. #4ecdc4) on the dark background.
+
 Return ONLY complete HTML. No markdown. No backticks.
 """
     html = call_claude(messages=[{"role": "user", "content": prompt}], max_tokens=3000)
