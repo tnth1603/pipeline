@@ -6,9 +6,6 @@ import numpy as np
 from io import StringIO, BytesIO
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
-from pptx import Presentation
-from pptx.util import Inches as PptxInches, Pt as PptxPt
-from pptx.dml.color import RGBColor as PptxRGB
 
 # ── APP SETUP ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -495,125 +492,10 @@ def make_docx(report_text, insights, cleaning_log=None):
             p = doc.add_paragraph()
             parse_inline_bold(p, line)
 
-    # Cleaning log appendix
-    doc.add_page_break()
-    doc.add_heading("Appendix: Data Cleaning Log", 1)
-    doc.add_paragraph(
-        "The following changes were made to the dataset automatically "
-        "by the AI cleaning agent:"
-    )
-
-    if cleaning_log:
-        for entry in cleaning_log:
-            action_taken = entry.get("action_taken", {})
-            action_str   = entry.get("action", "")
-            description  = entry.get("description", "N/A")
-            iteration    = entry.get("iteration", "?")
-            issue_type   = entry.get("issue_type", "unknown")
-
-            if action_str == "applied" and action_taken:
-                text = (
-                    f"Iteration {iteration} — {issue_type.upper()} — {description} — "
-                    f"Action: {action_taken.get('type','')} on "
-                    f"'{action_taken.get('column','')}' — "
-                    f"Rows: {entry.get('rows_before','?')} → {entry.get('rows_after','?')}"
-                )
-                p = doc.add_paragraph(style='List Bullet')
-                p.add_run(text).font.size = Pt(10)
-
-            elif action_str == "flagged for human review":
-                p = doc.add_paragraph(style='List Bullet')
-                run = p.add_run(f"Iteration {iteration} — FLAGGED — {description}")
-                run.font.size = Pt(10)
-                run.font.color.rgb = RGBColor(0xf5, 0x9e, 0x0b)
-
-            elif "error" in action_str.lower():
-                # FIX 2: friendly message instead of raw JSON parse error
-                p = doc.add_paragraph(style='List Bullet')
-                run = p.add_run(
-                    f"Iteration {iteration} — Cleaning agent completed inspection. "
-                    f"Data passed to analysis unchanged."
-                )
-                run.font.size = Pt(10)
-                run.font.color.rgb = RGBColor(0x6b, 0x72, 0x80)
-
-            elif action_str.startswith("fix_failed"):
-                p = doc.add_paragraph(style='List Bullet')
-                run = p.add_run(f"Iteration {iteration} — Fix attempted but failed — {description}")
-                run.font.size = Pt(10)
-                run.font.color.rgb = RGBColor(0xef, 0x44, 0x44)
-            else:
-                p = doc.add_paragraph(style='List Bullet')
-                p.add_run(f"Iteration {iteration} — {description} — {action_str}").font.size = Pt(10)
-    else:
-        doc.add_paragraph("No cleaning actions were applied in this run.")
+    
 
     buf = BytesIO()
     doc.save(buf)
-    return base64.b64encode(buf.getvalue()).decode()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 6: POWERPOINT SLIDES
-# ─────────────────────────────────────────────────────────────────────────────
-def make_slides(insights, report_text):
-    slide_prompt = f"""
-Create a presentation slide plan. Return ONLY a JSON array, no markdown.
-Each slide: {{"title": "string", "bullets": ["string"], "headline_stat": "string", "notes": "string"}}
-Generate exactly 7 slides: title, KPIs, trends, peak timeline, top items, anomalies, recommendations.
-Data: {json.dumps(insights)}
-"""
-    raw = call_claude(messages=[{"role": "user", "content": slide_prompt}], max_tokens=1500)
-    slides_plan = parse_claude_json(raw)
-
-    prs = Presentation()
-    prs.slide_width  = PptxInches(13.33)
-    prs.slide_height = PptxInches(7.5)
-    blank = prs.slide_layouts[6]
-
-    for sd in slides_plan:
-        slide = prs.slides.add_slide(blank)
-        bg = slide.background.fill
-        bg.solid()
-        bg.fore_color.rgb = PptxRGB(0x0f, 0x17, 0x2a)
-
-        txb = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(0.3), PptxInches(12), PptxInches(1.2))
-        tf  = txb.text_frame
-        tf.word_wrap = True
-        p = tf.paragraphs[0]
-        p.text = sd.get("title", "")
-        if p.runs:
-            p.runs[0].font.size  = PptxPt(28)
-            p.runs[0].font.bold  = True
-            p.runs[0].font.color.rgb = PptxRGB(0xff, 0xff, 0xff)
-
-        stat = sd.get("headline_stat", "")
-        if stat:
-            stb = slide.shapes.add_textbox(PptxInches(9.5), PptxInches(1.5), PptxInches(3.3), PptxInches(1.5))
-            sp  = stb.text_frame.paragraphs[0]
-            sp.text = stat
-            if sp.runs:
-                sp.runs[0].font.size  = PptxPt(28)
-                sp.runs[0].font.bold  = True
-                sp.runs[0].font.color.rgb = PptxRGB(0x4e, 0xcd, 0xc4)
-
-        bullets = sd.get("bullets", [])
-        if bullets:
-            bxb = slide.shapes.add_textbox(PptxInches(0.5), PptxInches(1.7), PptxInches(8.8), PptxInches(5.3))
-            btf = bxb.text_frame
-            btf.word_wrap = True
-            for j, b in enumerate(bullets):
-                bp = btf.paragraphs[0] if j == 0 else btf.add_paragraph()
-                bp.text = f"->  {b}"
-                if bp.runs:
-                    bp.runs[0].font.size  = PptxPt(15)
-                    bp.runs[0].font.color.rgb = PptxRGB(0xcc, 0xcc, 0xee)
-
-        notes = sd.get("notes", "")
-        if notes:
-            slide.notes_slide.notes_text_frame.text = notes
-
-    buf = BytesIO()
-    prs.save(buf)
     return base64.b64encode(buf.getvalue()).decode()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -649,15 +531,12 @@ def run_pipeline():
         dashboard_html = generate_dashboard(insights, company)
         report_text    = write_report(insights)
         docx_b64       = make_docx(report_text, insights, cleaning_log=cleaning_log)
-        pptx_b64       = make_slides(insights, report_text)
 
         date_str = pd.Timestamp.today().strftime("%Y-%m-%d")
 
         return jsonify({
             "docx_b64":        docx_b64,
             "docx_filename":   f"Report_{date_str}.docx",
-            "pptx_b64":        pptx_b64,
-            "pptx_filename":   f"Slides_{date_str}.pptx",
             "dashboard_html":  dashboard_html,
             "dash_filename":   f"Dashboard_{date_str}.html",
             "insights":        insights,
