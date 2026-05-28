@@ -159,10 +159,16 @@ def compute_global_stats(df_full):
         loc_col = stats.get("location_column", None)
         if loc_col and numeric_cols:
             first_num = numeric_cols[0]
+            # Exclude OWID aggregate rows (World, continents, etc.) from the
+            # country ranking — filter by both iso_code prefix AND location name.
             if 'iso_code' in df_full.columns:
                 countries = df_full[~df_full['iso_code'].str.startswith('OWID', na=False)]
             else:
                 countries = df_full
+            # Also drop rows where location is a known aggregate label.
+            agg_labels = ['World', 'Asia', 'Europe', 'Africa', 'North America',
+                          'South America', 'Oceania', 'European Union']
+            countries = countries[~countries[loc_col].isin(agg_labels)]
             top10 = (
                 countries.groupby(loc_col)[first_num]
                 .max().nlargest(10).reset_index()
@@ -176,8 +182,13 @@ def compute_global_stats(df_full):
         if 'total_cases' in df_full.columns and 'total_deaths' in df_full.columns:
             world = df_full[df_full['location'].str.contains('World|OWID_WRL', na=False)]
             if not world.empty:
-                tc = int(world['total_cases'].max())
-                td = int(world['total_deaths'].max())
+                # OWID data is cumulative — use the most recent row's value,
+                # NOT .max() which would sum across all dates and produce
+                # inflated numbers (471M instead of the correct ~180K).
+                world_sorted = world.sort_values('date', ascending=True)
+                last_row = world_sorted.dropna(subset=['total_cases', 'total_deaths']).iloc[-1]
+                tc = int(last_row['total_cases'])
+                td = int(last_row['total_deaths'])
                 stats["total_global_cases"]     = tc
                 stats["total_global_deaths"]    = td
                 stats["case_fatality_rate_pct"] = round((td / tc * 100), 4) if tc > 0 else 0.0
@@ -380,14 +391,21 @@ Dark professional theme (#0f172a background, white text, teal accents #4ecdc4).
 
 CRITICAL CHART.JS RENDERING RULES (the dashboard is screenshotted by a
 headless browser, so the chart MUST paint its final state immediately):
-1. Give the <canvas> an EXPLICIT width and height attribute, e.g.
-   <canvas id="chart" width="1200" height="420"></canvas>
-2. In the Chart config options set:
+1. Wrap the canvas in a div with overflow hidden to prevent gridlines bleeding outside:
+   <div style="width:100%;overflow:hidden;position:relative;">
+     <canvas id="chart" width="1100" height="420"></canvas>
+   </div>
+2. In the Chart config options set ALL of the following:
      animation: false,
      responsive: false,
-     maintainAspectRatio: false
-   so there is no entry animation and the chart does not depend on a
-   resize/layout pass.
+     maintainAspectRatio: false,
+     layout: {{ padding: {{ top: 10, right: 30, bottom: 10, left: 10 }} }},
+     scales: {{
+       x: {{ grid: {{ drawBorder: false, color: 'rgba(255,255,255,0.08)' }} }},
+       y: {{ grid: {{ drawBorder: false, color: 'rgba(255,255,255,0.08)' }},
+              ticks: {{ maxTicksLimit: 6 }} }}
+     }}
+   This prevents gridlines from rendering outside the chart canvas area.
 3. Load Chart.js with a normal <script> in <head> (not async/defer), and
    build the chart inside a window.addEventListener('load', ...) handler so
    the library is guaranteed to be parsed first.
@@ -398,6 +416,8 @@ headless browser, so the chart MUST paint its final state immediately):
        document.body.setAttribute('data-chart-ready', 'true');
      }});
 5. Use a high-contrast bar colour (e.g. #4ecdc4) on the dark background.
+6. Do NOT let any chart element (gridlines, axes, labels) render outside the
+   canvas boundary. The overflow:hidden wrapper enforces this.
 
 Return ONLY complete HTML. No markdown. No backticks.
 """
