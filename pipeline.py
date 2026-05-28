@@ -72,7 +72,7 @@ def parse_claude_json(raw):
 # Free tier at screenshotone.com — 100 screenshots/month
 # ─────────────────────────────────────────────────────────────────────────────
 def html_to_screenshot(html_content):
-    import urllib.request
+    import urllib.request, urllib.error
     api_key = os.environ.get("SCREENSHOT_API_KEY", "")
     if not api_key:
         return None
@@ -88,11 +88,10 @@ def html_to_screenshot(html_content):
             "block_cookie_banners": True,
             # Wait for the network (CDN Chart.js) to settle before capture.
             "wait_until":           "networkidle0",
-            # Block until the chart has actually been drawn. The dashboard
-            # sets this attribute right after new Chart(...) completes.
-            "wait_for_selector":    "body[data-chart-ready='true']",
-            # Fallback safety margin in case the selector resolves early.
-            "delay":                2
+            # The dashboard disables Chart.js animations, so the chart paints
+            # its final state on the first frame. A delay is enough to be safe;
+            # no selector wait is needed (and avoids unsupported parameters).
+            "delay":                4
         }).encode("utf-8")
         req = urllib.request.Request(
             "https://api.screenshotone.com/take",
@@ -103,8 +102,18 @@ def html_to_screenshot(html_content):
         with urllib.request.urlopen(req, timeout=60) as resp:
             if resp.status == 200:
                 return base64.b64encode(resp.read()).decode()
+            print(f"[screenshot] non-200 status: {resp.status}")
         return None
-    except Exception:
+    except urllib.error.HTTPError as e:
+        # Surface the real reason instead of silently returning None.
+        try:
+            body = e.read().decode()[:500]
+        except Exception:
+            body = ""
+        print(f"[screenshot] HTTPError {e.code}: {body}")
+        return None
+    except Exception as e:
+        print(f"[screenshot] failed: {e}")
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
