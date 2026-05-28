@@ -87,7 +87,8 @@ def html_to_screenshot(html_content):
             "block_ads":            True,
             "block_cookie_banners": True,
             # Wait for the network (CDN Chart.js) to settle before capture.
-            "wait_until":           "networkidle0",
+            # Screenshotone requires wait_until to be an ARRAY, not a string.
+            "wait_until":           ["networkidle0"],
             # The dashboard disables Chart.js animations, so the chart paints
             # its final state on the first frame. A delay is enough to be safe;
             # no selector wait is needed (and avoids unsupported parameters).
